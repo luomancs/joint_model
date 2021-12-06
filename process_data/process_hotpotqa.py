@@ -5,8 +5,8 @@ import numpy as np
 import string 
 import math
 
-from common.utils_plus import *
 
+from common.utils_plus import *
 
 # this function process the raw hotpotQA data to the desired input format. one example of the input format is given below. 
 '''
@@ -32,7 +32,7 @@ def hotpot(read_path, save_path,mode="train"):
                 supporting_title[title] = [idx]
             else:
                 supporting_title[title].append(idx)
-        
+
         for para in item['context']:
             title = para[0]
             sents_label = [-1]*(len(para[1]))
@@ -46,7 +46,8 @@ def hotpot(read_path, save_path,mode="train"):
             datum = {
                 'para':"</s> ".join([question]+para[1][:9]),
                 'para_label':para_label,
-                'sents_label':sents_label[:9]
+                'sents_label':sents_label[:9],
+                'target_text': answer,
             }
             if title in supporting_title:
                 posi_para.append(datum)
@@ -65,3 +66,6 @@ def normalize(str1):
     str2 = str1.translate(translator)
     str2 = str2.lower().replace(" ","")
     return str2
+
+path = '../dataset/para_training/'
+hotpot(path+'hotpot_train_v1.1.json', path+'train.jsonl', mode='train')

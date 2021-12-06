@@ -16,7 +16,7 @@
 # limitations under the License.
 """ Finetuning the library models for sequence classification on GLUE (Bert, XLM, XLNet, RoBERTa, Albert, XLM-RoBERTa)."""
 
-
+from collections import defaultdict
 import dataclasses
 import logging
 import os
@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Dict, Optional
 
 import numpy as np
-
+from transformers import RobertaTokenizerFast
 from transformers import GlueDataTrainingArguments as DataTrainingArguments
 from transformers import (
     HfArgumentParser,
@@ -37,7 +37,7 @@ import torch.nn as nn
 
 from transformers import AutoModel, AutoConfig
 from transformers import PreTrainedModel, BertPreTrainedModel
-from transformers.modeling_outputs import SequenceClassifierOutput
+from transformers.modeling_outputs import QuestionAnsweringModelOutput
 # from transformers import _BaseAutoModelClass
 from torch.nn import MSELoss, CrossEntropyLoss, TripletMarginLoss, TripletMarginWithDistanceLoss
 import torch
@@ -96,10 +96,19 @@ class JointQAModel(BertPreTrainedModel):
         self.model = AutoModel.from_config(config)
         self.para_classifier = nn.Linear(config.hidden_size, config.num_labels)
         self.sent_classifier = ClassificationSent(config)
+        self.tokenizer=RobertaTokenizerFast.from_pretrained('roberta-base')
+        self.qa_outputs = nn.Linear(config.hidden_size, 2)
+
         self.use_sent_loss = config.use_sent_loss
-        
+        self.use_qa_loss = config.use_qa_loss
+
         print("use sentence loss in the training: ", self.use_sent_loss)
+        print("use qa loss in the training: ", self.use_qa_loss)
+
         self.init_weights()
+        self.losses = defaultdict(list)
+
+
 
 
     def forward(
@@ -114,9 +123,8 @@ class JointQAModel(BertPreTrainedModel):
         output_attentions=None,
         output_hidden_states=None,
         return_dict=None,
-        use_sent_loss = True,
-        start_position= None, 
-        end_position = None, 
+        start_positions= None, 
+        end_positions = None, 
     ):
         r"""
         labels (:obj:`torch.LongTensor` of shape :obj:`(batch_size,)`, `optional`, defaults to :obj:`None`):
@@ -142,35 +150,69 @@ class JointQAModel(BertPreTrainedModel):
         
         logits = self.para_classifier(outputs.pooler_output)
         
+        qa_logits = self.qa_outputs(outputs.last_hidden_state)
+        start_logits, end_logits = qa_logits.split(1, dim=-1)
+        start_logits = start_logits.squeeze(-1).contiguous()
+        end_logits = end_logits.squeeze(-1).contiguous()
+        #print('model ansswer token = ' + str(torch.argmax(start_logits, dim=1)))
+        print('model answer start string =  '+str(self.tokenizer.decode([input_ids[0][torch.argmax(start_logits, dim=1)[0]]])))
+        print('model answer end string =  '+str(self.tokenizer.decode([input_ids[0][torch.argmax(end_logits, dim=1)[0]]])))
+
         loss = None
-        
+        output = None
         if labels is not None:
             if self.num_labels == 1:
                 #  We are doing regression
                 loss_fct = MSELoss()
                 loss = loss_fct(logits.view(-1), labels[:,0].view(-1))
-                
+                self.losses['loss1'].append(loss.item())
+
                 if self.use_sent_loss:
                     logits_sents, sents_features, sents_labels, sent_segment = self.sent_classifier(outputs.last_hidden_state, input_ids, labels[:,1:])
                     
                     loss2 = loss_fct(logits_sents.view(-1), sents_labels.view(-1))
                     loss += loss2
-                    
-                    
+                    self.losses['loss2'].append(loss2.item())
+                if self.use_qa_loss:
+                    if start_positions is not None and end_positions is not None:
+                        # If we are on multi-GPU, split add a dimension
+                        if len(start_positions.size()) > 1:
+                            start_positions = start_positions.squeeze(-1)
+                        if len(end_positions.size()) > 1:
+                            end_positions = end_positions.squeeze(-1)
+                        
+                        # sometimes the start/end positions are outside our model inputs, we ignore these terms
+                        ignored_index = start_logits.size(1)
+                        loss_fct = CrossEntropyLoss(ignore_index=ignored_index)
+                        start_positions = start_positions.clamp(0, ignored_index)
+                        end_positions = end_positions.clamp(0, ignored_index)
+                        print("Start Position: ",self.tokenizer.decode([input_ids[0][start_positions[0]]])," End Position: ", self.tokenizer.decode([input_ids[0][end_positions[0]]]))
+                        start_loss = loss_fct(start_logits, start_positions)
+                        end_loss = loss_fct(end_logits, end_positions)
+                        loss3 = (start_loss + end_loss) / 2
+                        loss += loss3
+                        self.losses['loss3'].append(loss3.item())
+                        #print(f'QA Loss: {loss3}')
+                        self.losses['Total_Loss'].append(loss.item())
             else:
                 loss_fct = CrossEntropyLoss()
                 loss = loss_fct(logits.view(-1, self.num_labels), label.view(-1))
-
+        
+        #print(f'Total Loss: {loss}')
         if not return_dict:
             output = (logits,) + outputs[2:]
+            #print(outputs)
             return ((loss,) + output) if loss is not None else output
 
-        return SequenceClassifierOutput(
+        return QuestionAnsweringModelOutput(
             loss=loss,
             logits=logits,
+            start_logits = start_logits,
+            end_logits = end_logits,
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
         )
+        
     def predict(
         self,
         input_ids=None,
@@ -179,11 +221,12 @@ class JointQAModel(BertPreTrainedModel):
         position_ids=None,
         head_mask=None,
         inputs_embeds=None,
-        label=None,
+        labels=None,
         output_attentions=None,
         output_hidden_states=None,
         return_dict=None,
-        use_sent_loss = True
+        use_sent_loss = True,
+        use_qa_loss=True
     ):
         r"""
         labels (:obj:`torch.LongTensor` of shape :obj:`(batch_size,)`, `optional`, defaults to :obj:`None`):
@@ -208,11 +251,17 @@ class JointQAModel(BertPreTrainedModel):
         sequence_output = outputs[0]
         logits = self.para_classifier(sequence_output)
         logits_sents, sents_features, sents_labels, sent_segment = self.sent_classifier(sequence_output, input_ids, labels)
+        start_positions, end_positions = self.qa_outputs(outputs.last_hidden_state)
+        start_positions, end_positions = qa_logits.split(1, dim=-1)
+        start_positions = start_positions.squeeze(-1).contiguous()
+        end_positions = end_positions.squeeze(-1).contiguous()
         
         return {
             "para_logits":logits,
             "sent_logits" : logits_sents,
             "sent_segment":sent_segment,
             "input_f":sents_features,
+            "start_logits":start_positions,
+            "end_logits":end_positions,
         }
     
