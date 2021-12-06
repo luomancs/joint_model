@@ -15,7 +15,7 @@
 # limitations under the License.
 """ Finetuning the library models for sequence classification on GLUE (Bert, XLM, XLNet, RoBERTa, Albert, XLM-RoBERTa)."""
 
-
+import json #added new line
 import dataclasses
 import logging
 import os
@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Dict, Optional
 
 import numpy as np
-
+from transformers import RobertaTokenizerFast
 from transformers import AutoConfig
 from transformers import AutoModelForSequenceClassification
 from transformers import AutoTokenizer
@@ -76,6 +76,9 @@ class ModelArguments:
     )
     use_sent_loss: Optional[bool] = field(
         default=False, metadata={"help": "use sent loss in the training"}
+    )
+    use_qa_loss: Optional[bool] = field(  
+        default=False, metadata={"help": "use QA loss in the training"}
     )
     use_consistent_loss: Optional[bool] = field(
         default=False, metadata={"help": "use consistent loss in the training"}
@@ -152,15 +155,21 @@ def main():
     config.use_sent_loss = model_args.use_sent_loss
     config.use_consistent_loss = model_args.use_consistent_loss
     config.use_triple_loss = model_args.use_triple_loss
+    config.use_qa_loss = model_args.use_qa_loss
     
-    tokenizer = AutoTokenizer.from_pretrained(
-        model_args.tokenizer_name if model_args.tokenizer_name else model_args.model_name_or_path,
-        cache_dir=model_args.cache_dir,
-        from_tf=bool(".ckpt" in model_args.model_name_or_path),
-    )
+    #tokenizer = AutoTokenizer.from_pretrained(
+    #    model_args.tokenizer_name if model_args.tokenizer_name else model_args.model_name_or_path,
+    #    cache_dir=model_args.cache_dir,
+    #    from_tf=bool(".ckpt" in model_args.model_name_or_path),
+   # )
+    tokenizer = RobertaTokenizerFast.from_pretrained('roberta-base')
     model = JointQAModel(config)
     model.model=model.model.from_pretrained(model_args.model_name_or_path)
     
+    logger.info(f'Training: {training_args.do_train}')
+    logger.info(f'Evalutaion: {training_args.do_eval}')
+    logger.info(f'Prediction: {training_args.do_predict}')
+
 
     # Get datasets
     train_dataset = (
@@ -205,6 +214,8 @@ def main():
         # For convenience, we also re-save the tokenizer to the same directory,
         # so that you can share your model easily on huggingface.co/models =)
         tokenizer.save_pretrained(training_args.output_dir)
+        with open('log_loss.txt', 'w') as f:
+          json.dump(model.losses, f)
 
     # Evaluation
     eval_results = {}
@@ -226,7 +237,7 @@ def main():
             output_eval_file = os.path.join(
                 training_args.output_dir, f"eval_results_{eval_dataset.args.task_name}.txt"
             )
-            if trainer.is_world_master():
+            if trainer.is_world_process_zero():
                 with open(output_eval_file, "w") as writer:
                     logger.info("***** Eval results {} *****".format(eval_dataset.args.task_name))
                     for key, value in eval_result.items():
@@ -245,14 +256,17 @@ def main():
             )
 
         for test_dataset in test_datasets:
+            
             predictions = trainer.predict(test_dataset=test_dataset).predictions
             if output_mode == "classification":
                 predictions = np.argmax(predictions, axis=1)
+            print('In Predictions')
+            print(len(predictions))
 
             output_test_file = os.path.join(
                 training_args.output_dir, f"test_results_{test_dataset.args.task_name}.txt"
             )
-            if trainer.is_world_master():
+            if trainer.is_world_process_zero():
                 with open(output_test_file, "w") as writer:
                     logger.info("***** Test results {} *****".format(test_dataset.args.task_name))
                     writer.write("index\tprediction\n")

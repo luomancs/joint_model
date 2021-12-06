@@ -29,7 +29,7 @@ We provide a function under `process_data/process_hotpotqa.py`to preprocess the 
 ## Experiment
 
 ### Training
-You can train a model with the following command, we use RoBERTa model, you can use any other encoder-based model, like BERT and ELECTRA. 
+You can train a model with the following command on your command terminal or you can use NLP_Project_Main.ipynb for the training purpose, we use RoBERTa model, you can use any other encoder-based model, like BERT and ELECTRA. 
 ```
 python model_train/train_para.py \
 --model_name_or_path roberta-base \
@@ -49,6 +49,7 @@ python model_train/train_para.py \
 --save_steps 10000 \
 --logging_steps 10000 \
 --use_sent_loss \
+--use_qa_loss \
 ```
 
 ## Citation
